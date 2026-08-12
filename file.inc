@@ -45,6 +45,18 @@ LINEBREAK_CRLF = 2
 ;Returns.............: Nothing
 ;Error returns.......: Nothing
 .proc file_init
+.if ::target_mem=target_x816
+    ;No drive status channel to introduce: the status buffer is the editor's
+    ;own message staging area here (x816_file.inc), so it starts empty rather
+    ;than starting with an ingress that every message would have to skip.
+    stz file_disk_status
+    stz file_cur_filename_len
+    stz file_cur_device
+    stz file_dir_changed
+    stz file_truncated
+    rts
+.endif
+
     ;Init disk status message
     ldx #0
 :   lda msg,x
@@ -55,7 +67,7 @@ LINEBREAK_CRLF = 2
 
     ;Reset file name
 :   stz file_cur_filename_len
-    
+
     ;Set default device 8
     lda #8
     sta file_cur_device
@@ -83,6 +95,12 @@ msg:
 ;                      the low RAM area is restored at the end of the function.
 .segment "CODE2"
 .proc file_write
+.if ::target_mem=target_x816
+    ;X816: K_FS_* instead of the Kernal and the IEC bus. The body below stays
+    ;in the tree unaltered so a merge from upstream still applies to it; it is
+    ;simply not reachable on this target.
+    jmp x816_file_write
+.endif
 .if ::target_mem=target_rom
     ;Save input on stack
     phx
@@ -390,6 +408,9 @@ bytes_written = tempvars+2
 ;Bank................: 2nd
 .segment "CODE2"
 .proc file_read
+.if ::target_mem=target_x816
+    jmp x816_file_read
+.endif
 .if ::target_mem = target_rom
     ;Save input on stack
     phx
@@ -783,6 +804,16 @@ loading:
 ;                      Status message in file_disk_status
 ;Error returns.......: None
 .proc file_read_disk_status
+.if ::target_mem=target_x816
+    ;There is no status channel: a kernel call reports its own failure in the
+    ;carry, and x816_file.inc has already put the outcome in file_io_err and a
+    ;message in file_disk_status. What is left for this to answer is the one
+    ;question cmd_file_save asks of the return value -- "did the file already
+    ;exist" -- so that the overwrite prompt still works.
+    lda x816_fs_status
+    rts
+.endif
+
     lda #0
     ldx #0
     ldy #0
@@ -799,6 +830,25 @@ loading:
 ;                      Status message returned in variable file_disk_status
 ;Error returns.......: None
 .proc file_disk_cmd
+.if ::target_mem=target_x816
+    ;DOS commands were IEC command-channel strings. The X816 equivalents are
+    ;K_FS_CHDIR, K_FS_MKDIR, K_FS_RMDIR, K_FS_DELETE and K_FS_RENAME, and
+    ;wiring the editor's dialog to them is its own step -- with the
+    ;complication that the editor must NOT resolve paths itself, because all
+    ;three callers share the kernel's one working directory. Until then say so
+    ;instead of talking to a bus that is not there.
+    stz file_io_err
+    stz x816_fs_status
+    ldx #<x816_msg_nodoscmd
+    ldy #>x816_msg_nodoscmd
+    jsr x816_status_stage
+    lda #0
+    rts
+
+x816_msg_nodoscmd:
+    .byt "dos commands are not available on x816", 0
+.endif
+
     ;Set default = no kernal error
     stz file_io_err
 
@@ -1043,6 +1093,7 @@ file_ioerr_10:
     file_cur_device:        .res 1              ;1 byte
     file_dir_changed:       .res 1              ;1 byte, flag indicating whether directory was changed since current file was last read/saved
     file_linebreak_encoding: .res 1
+    file_truncated:         .res 1              ;1 byte, set when a load stopped short because the buffer filled; a save back over the source file is then refused
 
 .segment "RAMCODE3"
     file_buf:               .res 256

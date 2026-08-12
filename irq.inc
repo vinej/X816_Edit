@@ -73,6 +73,14 @@
 .endproc
 .endif
 
+.if target_mem=target_x816
+.proc irq_init
+    lda #1
+    sta irq_flag
+    rts
+.endproc
+.endif
+
 ;******************************************************************************
 ;Function name.......: irq_restore
 ;Purpose.............: Restores original IRQ handler
@@ -80,6 +88,9 @@
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc irq_restore
+.if ::target_mem=target_x816
+    rts
+.else
     sei
     lda irq_default_handler
     sta $0314
@@ -87,6 +98,7 @@
     sta $0315
     cli
     rts
+.endif
 .endproc
 
 ;******************************************************************************
@@ -111,6 +123,10 @@ exit:
     .endif
 
     .if (::target_mem=target_rom)
+        rts
+    .endif
+
+    .if (::target_mem=target_x816)
         rts
     .endif
 .endproc

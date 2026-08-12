@@ -25,18 +25,23 @@
 
 .export main_default_entry
 .export main_loadfile_entry
+;main_x816_entry is exported where it is defined, further down: exporting it
+;here made the X16 RAM and ROM targets fail to assemble outright, because the
+;symbol only exists when target_mem=target_x816.
 
 ;******************************************************************************
 ;Check build target
 .define target_ram 1
 .define target_rom 2
+.define target_x816 3
 
 .ifndef target_mem
-    .error "target_mem not set (1=RAM, 2=ROM)"
+    .error "target_mem not set (1=RAM, 2=ROM, 3=X816)"
 .elseif target_mem=1
 .elseif target_mem=2
+.elseif target_mem=3
 .else
-    .error "target_mem invalid value (1=RAM, 2=ROM)"
+    .error "target_mem invalid value (1=RAM, 2=ROM, 3=X816)"
 .endif
 
 ;******************************************************************************
@@ -75,6 +80,62 @@ jmp main_loadfile_with_options_entry2
 exit:
     rts
 .endproc
+
+.if target_mem=target_x816
+.export main_x816_entry
+
+;******************************************************************************
+;Function name.......: main_x816_entry
+;Purpose.............: X816 resident entry function. Starts the editor and
+;                      opens the zero-terminated file named by the K_EDIT
+;                      caller, or an empty buffer if there is no name.
+;Input...............: x816_edit_arg_ptr = 24-bit filename pointer, or 0
+;Returns.............: Nothing
+;Error returns.......: None
+;Note................: All three callers -- the shell's `edit`, SuperBasic's
+;                      EDIT and durexForth's `edit` -- arrive here, so the
+;                      file is opened once, in one place, against the kernel's
+;                      shared working directory.
+.proc main_x816_entry
+    ;First RAM bank=1, last RAM bank=255
+    ldx #1
+    ldy #255
+
+    jsr main_init
+    bcs exit            ;C=1 => init failed
+    jsr x816_set_filename_from_arg
+    jsr x816_open_arg_file
+    jmp main_loop
+exit:
+    rts
+.endproc
+
+;******************************************************************************
+;Function name.......: x816_open_arg_file
+;Purpose.............: Loads the file named by the K_EDIT caller, if any
+;Input...............: x816_edit_arg_len, file_cur_filename
+;Returns.............: Nothing
+;Error returns.......: None. A file that cannot be read leaves an empty buffer
+;                      and its error on the status line, which is what the
+;                      editor does for a failed Ctrl+O -- refusing to start
+;                      would strand the caller with nothing.
+.proc x816_open_arg_file
+    lda x816_edit_arg_len
+    beq exit
+
+    ldx #<file_cur_filename
+    ldy #>file_cur_filename
+    lda x816_edit_arg_len
+    jsr cmd_file_open
+
+    ldx #0
+    ldy #2
+    jsr cursor_move
+
+exit:
+    rts
+.endproc
+.endif
 
 ;******************************************************************************
 ;Function name.......: main_loadfile_entry
@@ -440,8 +501,36 @@ errormsg:
         stz ROM_SEL
     .endif
 
+.if (::target_mem=target_x816)
+    pea $0000
+    plb
+    plb
+.endif
+
     ;Set program in running state
     stz APP_QUIT
+
+.if (::target_mem=target_x816)
+    lda x816_mem_smoke_request
+    cmp #2
+    bne :+
+    jsr x816_smoke_delay
+    stz x816_mem_smoke_request
+    rts
+:
+    cmp #3
+    bne :+
+    stz x816_mem_smoke_request
+    jsr x816_type_smoke
+    rts
+:
+    cmp #4
+    bne :+
+    stz x816_mem_smoke_request
+    jsr x816_file_smoke
+    rts
+:
+.endif
 
     ;Disable emulator Ctrl/Cmd key interception
     lda $9fb7
@@ -454,6 +543,11 @@ mainloop:
     lda APP_QUIT                        ;Time to quit?
     cmp #1
     beq shutdown
+
+.if (::target_mem=target_x816)
+    lda #1
+    sta irq_flag
+.endif
 
     lda irq_flag                        ;Wait for IRQ flag
     beq mainloop
@@ -497,6 +591,167 @@ shutdown:
     rts
 .endproc
 
+.if target_mem=target_x816
+;******************************************************************************
+;Function name.......: x816_type_smoke
+;Purpose.............: Exercise the resident editor's normal key dispatch path
+;                      with text insertion, exit prompt, and discard/return.
+;Input...............: Nothing
+;Returns.............: Nothing
+;Error returns.......: None
+.proc x816_type_smoke
+    stz scancode_modifiers
+
+    lda #KEYVAL_A
+    jsr keyboard_mode_default
+    lda #'B'
+    jsr keyboard_mode_default
+    lda #'C'
+    jsr keyboard_mode_default
+
+    jsr x816_smoke_delay
+
+    lda #KBD_MODIFIER_CTRL
+    sta scancode_modifiers
+    lda #'X'
+    jsr keyboard_mode_default
+
+    stz scancode_modifiers
+    lda #KEYVAL_N
+    jsr keyboard_mode_exit_save_before
+    lda #$42
+    sta x816_mem_smoke_result
+    rts
+.endproc
+
+;******************************************************************************
+;Function name.......: x816_file_smoke
+;Purpose.............: Round-trips a file through the real editor: the file
+;                      named by the caller has already been loaded by
+;                      x816_open_arg_file, so this holds the loaded text on
+;                      screen long enough to be captured, then saves the
+;                      buffer out under a second name through the editor's own
+;                      save path.
+;
+;                      What that covers end to end: K_FS_OPEN and K_FS_READ,
+;                      the line-break detection, the fill of the linked 256-
+;                      byte pages, the render of that buffer, the page walk
+;                      back out, K_FS_WRITE and K_FS_CLOSE. The shell then
+;                      compares the two files, which is the only way to catch
+;                      a write that reports the right byte count and moves the
+;                      wrong bytes.
+;Input...............: Nothing
+;Returns.............: x816_mem_smoke_result = 0 on success, else $80 + the
+;                      error code that stopped it
+;Error returns.......: None
+.proc x816_file_smoke
+    lda #$ff
+    sta x816_mem_smoke_result
+
+    ;Did the load itself fail?
+    lda file_io_err
+    beq :+
+    ora #$80
+    sta x816_mem_smoke_result
+    rts
+
+    ;Let the loaded text sit on screen for a captured frame.
+:   jsr x816_smoke_delay
+
+    ;Save under a second name. The '@' is the editor's own overwrite prefix,
+    ;so the run repeats without tripping the overwrite prompt -- and it
+    ;exercises the prefix stripping on the way through.
+    jsr stage_name
+    ldx #<prompt_input
+    ldy #>prompt_input
+    jsr cmd_file_save
+
+    lda file_io_err
+    beq ok
+    ora #$80
+    sta x816_mem_smoke_result
+    rts
+
+ok:
+    stz x816_mem_smoke_result
+    rts
+
+    ;The name is a literal, so it lives in the firmware bank with the rest of
+    ;the code, while everything that reads a file name does so with (zp),y
+    ;through DBR=$00. Stage it into bank $00 first. Returns the length in A.
+stage_name:
+    ldy #0
+:   x816_code_dbr_on
+    lda outname,y
+    x816_code_dbr_off
+    beq :+
+    sta prompt_input,y
+    iny
+    bra :-
+:   tya
+    rts
+
+outname:
+    .byt "@editout.txt", 0
+.endproc
+
+;******************************************************************************
+;Function name.......: x816_set_filename_from_arg
+;Purpose.............: Copy the zero-terminated filename passed by K_EDIT into
+;                      the editor's current filename field. The X816 file I/O
+;                      backend is still separate; this seeds the session name.
+;Input...............: x816_edit_arg_ptr = 24-bit filename pointer, or 0
+;Returns.............: Nothing
+;Error returns.......: None
+.proc x816_set_filename_from_arg
+    sep #$30
+
+    lda x816_edit_arg_ptr
+    sta r14
+    lda x816_edit_arg_ptr+1
+    sta r14+1
+    lda x816_edit_arg_ptr+2
+    sta r14+2
+
+    lda r14
+    ora r14+1
+    ora r14+2
+    beq no_name
+
+    stz file_dir_changed
+    ldy #0
+count_loop:
+    cpy #$ff
+    beq have_len
+    lda [r14],y
+    beq have_len
+    iny
+    bra count_loop
+
+have_len:
+    sty x816_edit_arg_len
+    sty file_cur_filename_len
+    cpy #0
+    beq done
+copy_loop:
+    dey
+    lda [r14],y
+    sta file_cur_filename,y
+    cpy #0
+    bne copy_loop
+done:
+    rts
+
+no_name:
+    ;The hand-off block at $07F8 is fixed RAM that no linker owns and nothing
+    ;clears between invocations -- that is what makes the buffer survive a
+    ;K_EXIT. It also means an unnamed `edit` would inherit the LAST call's
+    ;length and try to open a file the caller never asked for.
+    stz x816_edit_arg_len
+    rts
+.endproc
+.endif
+
 .include "appversion.inc"
 .include "screen.inc"
 .include "keyboard.inc"
@@ -516,6 +771,10 @@ shutdown:
 .include "mouse.inc"
 .include "compile.inc"
 .include "help.inc"
+.if target_mem=target_x816
+    .include "x816_kernal.inc"
+    .include "x816_file.inc"
+.endif
 .include "jsrfar.inc"
 .include "printer.inc"
 

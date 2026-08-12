@@ -71,6 +71,10 @@ keyboard_shortcut_count = 28
     dex
     bne :-
 
+.if ::target_mem=target_x816
+    rts
+.endif
+
     ;Read shortcut table from file, if available
     bridge_setaddr KERNAL_CLOSE         ;Close file #1
     lda #1

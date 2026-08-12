@@ -449,6 +449,13 @@ msg:
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc cmd_file_show_io_err
+.if ::target_mem=target_x816
+    ;The X816 codes are the kernel's KERR_* codes plus the editor's own few,
+    ;and the messages have to be staged out of the firmware bank before
+    ;screen_print_status can read them. Both live in x816_file.inc.
+    jmp x816_show_io_err
+.endif
+
     dex
     lda file_ioerr_H,x
     tay

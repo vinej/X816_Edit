@@ -822,6 +822,21 @@ linebreak_deleted_exit:
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc cmd_go_start
+.if ::target_mem=target_x816
+    lda #X816_EDIT_BASE_BANK
+    sta BNK_SEL
+    sta CRS_BNK     ;Cursor
+    sta LNV_BNK     ;Line first visible char
+    sta SCR_BNK     ;Screen first visible char
+
+    lda #X816_EDIT_BASE_PAGE
+    sta CRS_ADR+1   ;Cursor
+    sta LNV_ADR+1   ;Line first visible char
+    sta SCR_ADR+1   ;Screen first visible char
+
+    bra set_offsets
+.endif
+
     ;Set bank
     lda mem_start
     ina             ;The head of buffer is the bank after mem_start (mem_start used for internal data storage)
@@ -836,6 +851,7 @@ linebreak_deleted_exit:
     sta LNV_ADR+1   ;Line first visible char
     sta SCR_ADR+1   ;Screen first visible char
 
+set_offsets:
     stz CRS_ADR     ;Cursor
     stz LNV_ADR     ;Line first visible char
     stz SCR_ADR     ;Screen first visible char

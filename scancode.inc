@@ -74,6 +74,13 @@
 .endproc
 .endif
 
+.if target_mem=target_x816
+.proc scancode_init
+    stz scancode_modifiers
+    rts
+.endproc
+.endif
+
 
 ;******************************************************************************
 ;Function name.......: scancode_restore
@@ -82,6 +89,9 @@
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc scancode_restore
+.if ::target_mem=target_x816
+    rts
+.else
     sei
     lda scancode_default_handler
     sta $032e
@@ -90,6 +100,7 @@
     cli
     
     rts
+.endif
 .endproc
 
 ;******************************************************************************
@@ -189,8 +200,10 @@ bitmask:
 
 .if target_mem=target_ram
     scancode_handler_exit_cmd = scancode_handler::exit
-.else
+.elseif target_mem=target_rom
     scancode_handler_exit_cmd = bridge_code + bridge_scancode_exit_cmd - bridge_kernal
+.else
+    scancode_handler_exit_cmd = scancode_handler::exit
 .endif
 
 scancode_default_handler = scancode_handler_exit_cmd+1

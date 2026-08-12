@@ -10,6 +10,14 @@ MOUSE_Y_OFFSET = 6
 ;Input...............: Nothing
 ;Error returns.......: Nothing
 .proc mouse_init    
+.if ::target_mem=target_x816
+    stz mouse_button_state
+    stz mouse_last_pos
+    stz mouse_last_pos+1
+    stz mouse_wheel
+    rts
+.endif
+
     ; Determine sprite color (dark background -> bright pointer, and vice versa)
     lda screen_color        ; Get background color
     lsr
@@ -154,6 +162,10 @@ bright_colors:
 ;Input...............: Nothing
 ;Error returns.......: Nothing
 .proc mouse_disable
+.if ::target_mem=target_x816
+    rts
+.endif
+
     bridge_setaddr KERNAL_MOUSE_CONFIG
     lda #0
     bridge_call KERNAL_MOUSE_CONFIG
@@ -168,6 +180,10 @@ bright_colors:
 ;Input...............: Nothing
 ;Error returns.......: Nothing
 .proc mouse_get
+.if ::target_mem=target_x816
+    rts
+.endif
+
     ; Abort if APP_MOD != 0
     lda APP_MOD
     beq :+

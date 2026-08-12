@@ -89,6 +89,67 @@ header:
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc help_decompress
+.if ::target_mem=target_x816
+    ; X816 has no X16 Kernal DECOMPRESS entry, and the resident firmware has
+    ; room for plain help text. Copy a zero-terminated incbin into the same
+    ; help buffer the original code displays.
+    lda r0
+    pha
+    lda r0+1
+    pha
+    lda r1
+    pha
+    lda r1+1
+    pha
+
+    lda mem_start
+    sta BNK_SEL
+
+    lda screen_width
+    cmp #64
+    bcc :+
+    lda screen_height
+    cmp #50
+    bcc :+
+
+    lda #<help_bin
+    sta r0
+    lda #>help_bin
+    sta r0+1
+    bra :++
+
+:   lda #<help_short_bin
+    sta r0
+    lda #>help_short_bin
+    sta r0+1
+
+:   lda #<help_txt
+    sta r1
+    lda #>help_txt
+    sta r1+1
+
+    ldy #0
+copy:
+    lda (r0),y
+    sta (r1),y
+    beq done
+    iny
+    bne copy
+    inc r0+1
+    inc r1+1
+    bra copy
+
+done:
+    pla
+    sta r1+1
+    pla
+    sta r1
+    pla
+    sta r0+1
+    pla
+    sta r0
+    rts
+.else
     ;Backup r0 and r1
     lda r0
     pha
@@ -201,7 +262,31 @@ decompress:
     sta r0
 
     rts
+.endif
 
+.if ::target_mem=target_x816
+.ifndef alt_shortcuts
+help_bin:
+    .incbin "help.txt"
+    .byte 0
+help_bin_end:
+
+help_short_bin:
+    .incbin "help_short.txt"
+    .byte 0
+help_short_bin_end:
+.else
+help_bin:
+    .incbin "help_alt.txt"
+    .byte 0
+help_bin_end:
+
+help_short_bin:
+    .incbin "help_alt_short.txt"
+    .byte 0
+help_short_bin_end:
+.endif
+.else
 .ifndef alt_shortcuts
 help_bin:
     .incbin "build/help.bin"
@@ -218,6 +303,7 @@ help_bin_end:
 help_short_bin:
     .incbin "build/help_alt_short.bin"
 help_short_bin_end:
+.endif
 .endif
 
 endL = tempvars

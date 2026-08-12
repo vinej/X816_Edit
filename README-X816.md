@@ -93,33 +93,35 @@ against `kfs`'s one `cwd`. `charset.inc` mostly deletes: CP437 *is* ASCII for
 65C02-specific it uses — `stz` ×277, `bra` ×152, `phx`/`plx`/`phy`/`ply` ×73 —
 exists on the 65816 and runs in native mode with M=1/X=1.
 
-## The one thing that does not exist yet
+## First prerequisite
 
-**Ctrl and Alt do not reach a program.** `X816_Calypsi/runtime/console.c`
-tracks `shift_l`/`shift_r` only; Ctrl and Alt arrive as `KEY_LCTRL`/`KEY_LALT`
-press-and-release events with no state and no composite. X16 Edit's entire UI is
-Ctrl+letter (`keyboard_ctrl_keyval`, `keyboard_ctrl_jmptbl`), so this blocks
-everything downstream. `console.h` says so itself: *"Making Ctrl-C a character
-is a design step, not a mapping one."*
+**Ctrl and Alt now reach a program as 16-bit key classes.** X16 Edit's entire
+UI is Ctrl+letter (`keyboard_ctrl_keyval`, `keyboard_ctrl_jmptbl`), so this was
+the blocker for everything downstream. The local X816 runtime now tracks Ctrl
+and Alt as state and returns `KEY_CTRL|key` / `KEY_ALT|key`, composable with
+`KEY_SPECIAL` for non-character keys, rather than stealing CP437 control glyphs.
 
-Two options, and it is an ABI addition either way:
+The important rule is now:
 
-* report Ctrl+A as `$01`-`$1A` — cheap, but those are real CP437 glyphs
-* a third 16-bit class (`0x0200|key` ctrl, `0x0400|key` alt) — unambiguous, and
-  what the 16-bit key encoding was built for
+* `KEY_CTRL|'c'` for Ctrl-C
+* `KEY_ALT|'x'` for Alt-X
+* `KEY_CTRL|KEY_SPECIAL|n` for Ctrl plus a special key
 
-Second one recommended. Confirm the keycodes on hardware with a `KEYSCAN`-style
-probe rather than from the RTL: console.h records that the last time these were
-assumed they were wrong in both places at once *and agreed with each other*.
+Confirm the raw Ctrl/Alt positions on hardware with a `KEYSCAN`-style probe
+before building editor behavior on them: console.h records that the last time
+these were assumed they were wrong in both places at once *and agreed with each
+other*.
 
 ## The call
 
-`K_EDIT`, slot 34 (`$00:FE88`) — the "programs" group beside `K_EXEC` (32) and
-`K_EXIT` (33). `C:X` = 24-bit path or 0 for an empty buffer, `Y` = option flags.
-Carry clear with `C` = 0 saved / 1 discarded; carry set with a `KERR_`.
-
-Not yet added to `contract.py` — the argument block should be settled first, and
-the slot number is ABI the moment it ships.
+`K_EDIT`, slot 34 (`$00:FE88`) - the "programs" group beside `K_EXEC` (32) and
+`K_EXIT` (33). It takes `C:X` as a zero-terminated filename pointer, or `0` for
+an unnamed buffer, and returns after the resident editor exits. **The file is
+opened**: the name is resolved by the kernel against the one working directory
+all three callers share, read into the buffer through `K_FS_OPEN`/`K_FS_READ`,
+and written back by Ctrl+S through `K_FS_WRITE`. A name that cannot be opened
+leaves an empty buffer and the reason on the status line rather than refusing to
+start, which is what the editor does for a failed Ctrl+O.
 
 **The shell needs no slot.** `kernelmain.c` is `con_init(); kern_install();
 kirq_install(); ccur_on(); sh_run();` — the shell **is** the resident kernel, so
@@ -130,22 +132,52 @@ first milestone: testable before either language shim exists.
 ## Milestones
 
 1. Ctrl/Alt in the console layer, with a hardware keycode confirmation.
-2. Build plumbing: fixed address, `.incbin` stub, firmware assembly, a
-   `run-edit.sh` in the house style with a negative control.
+   Implemented locally; hardware confirmation still open.
+2. Build plumbing and resident shell entry: fixed address, `.incbin` stub,
+   firmware assembly, shell `edit`, and `run-edit.sh`.
+   Current local state: `make x816` builds a ca65 raw blob at `$2000` with a
+   native-mode JSL-safe wrapper. The Calypsi resident kernel incbins it at
+   `$F1:2000`; `edit` enters the real editor entry and reinitializes the shell
+   console after return. `editsmk` is a resident-only smoke command that exits
+   after editor setup so the harness can prove readable first-screen render,
+   both footer rows, and return without relying on untypeable `-autokeys`
+   Ctrl/ESC chords.
 3. `mem.inc` onto flat 24-bit pointers.
-4. `file.inc`/`dir.inc`/`cmd_file.inc` onto `K_FS_*`.
+   Local state: the head page lives at `$C1:0800`, above eight reserved scratch
+   pages that hold the file transfer buffer, the staged path, the `K_FS_*`
+   parameter blocks and the caller's register/variable backup — bank $00 is the
+   caller's, so none of that may live there. `mem_alloc`/`mem_free` use a bitmap
+   at `$DF:FC00`, reserving page `00` in each bank as the inherited null-link
+   sentinel. `run-editmem.sh` proves allocate/link/free and that the scratch
+   pages are never handed out; `run-edittype.sh` proves insert/render/exit/
+   return through the normal key handlers; `run-editfile.sh` fills pages from a
+   real file and walks them back out. Defrag is still disabled, and links are
+   still bank+page rather than flat 24 bits.
+4. `file.inc` onto `K_FS_*` — **done**, in the X816-only `x816_file.inc`: load,
+   save, line-break detection preserved, tab expansion, `@`/`0:` prefix
+   stripping, the kernel's `KERR_*` codes reported as the editor's own, and a
+   refusal to save a truncated buffer over its source. `dir.inc` and the
+   file/DOS dialogs are what is left.
 5. Screen save/restore (80×60×2 = 9,600 bytes) so returning to a REPL does not
    blank it.
-6. Shell `edit`, then slot 34, then the durexForth and SuperBasic shims.
+6. Shell `edit [path]`, kernel slot 34 (`K_EDIT`), SuperBasic `EDIT [path]`,
+   and durexForth `S" path" edit` are in place and open the named file.
+   `../X816_Calypsi/programs/shell/run-editfile.sh` proves load → render → save
+   → read back on a fresh machine, byte for byte and at the source's exact
+   size, with a `--negative` control; `../X816_SuperBasic/run-edit-smoke.sh`
+   proves the same load through a language caller.
 
 ## Two bugs to fix that upstream does not have to care about
 
-**A truncated load can overwrite the original.** `file.inc:711-717`: a file
-larger than the buffer stops at `mem_full` and reports it, leaving a **partial**
-buffer — and Ctrl+S then writes that over the source. Survivable for a source
-file you were editing anyway; data loss for an arbitrary file off the card,
-which is what "the editor is available from the console for any file" makes
-routine. Needs a `truncated` flag that refuses save-over-source.
+**A truncated load could overwrite the original — fixed.**
+`file.inc:711-717`: a file larger than the buffer stops at `mem_full` and
+reports it, leaving a **partial** buffer — and Ctrl+S then wrote that over the
+source. Survivable for a source file you were editing anyway; data loss for an
+arbitrary file off the card, which is what "the editor is available from the
+console for any file" makes routine. `x816_file.inc` sets `file_truncated`,
+remembers the path the partial buffer came from, and refuses a save to that same
+path with "partial buffer: save under another name". Tripping it needs a file
+larger than the 2 MB buffer, so it is not yet covered by a test.
 
 **Nothing else — and one thing is already right.** `file.inc:570-595` detects
 LF / CR / CRLF on load and `file.inc:212-227` writes the same encoding back, so

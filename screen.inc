@@ -30,6 +30,24 @@
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc screen_init
+.if ::target_mem=target_x816
+    stz VERA_CTRL
+    lda #$11
+    sta VERA_VIDEO
+    lda #$80
+    sta $9f2a
+    sta $9f2b
+    lda #$60
+    sta VERA_L0_CONFIG
+    stz VERA_L0_MAPBASE
+    lda #$20
+    sta VERA_L0_TILEBASE
+    lda #0
+    sta screen_mode
+    stz file_linebreak_encoding
+    jmp prepare_screen
+.endif
+
     ;Set layer 1 active
     lda VERA_VIDEO
     and #%11101111
@@ -109,12 +127,20 @@ prepare_screen:
 ;Returns.............: Nothing
 ;Error returns.......: None
 .proc screen_get_dimensions
+.if ::target_mem=target_x816
+    ldx #SCREEN_WIDTH
+    ldy #SCREEN_HEIGHT
+    stx screen_width
+    sty screen_height
+    rts
+.else
     sec
     bridge_setaddr KERNAL_SCREEN_MODE
     bridge_call KERNAL_SCREEN_MODE
     stx screen_width
     sty screen_height
     rts
+.endif
 .endproc
 
 ;******************************************************************************
@@ -148,7 +174,9 @@ prepare_screen:
 
     ldx #0
 name_loop:
+    x816_code_dbr_on
     lda program_name,x
+    x816_code_dbr_off
     beq filename
     jsr screen_put_uc_char
     inx
@@ -198,7 +226,9 @@ new_buffer:
 
     ldy #0
 newbuffer_loop:
+    x816_code_dbr_on
     lda new_buffer_msg,y
+    x816_code_dbr_off
     jsr screen_put_uc_char
     iny
     cpy #10
@@ -335,7 +365,9 @@ bin_to_str:
     rts
 
 printlabel:
+    x816_code_dbr_on
     lda labels,x
+    x816_code_dbr_off
     beq :+
     jsr screen_put_uc_char
     inx
@@ -401,11 +433,15 @@ brk_enc_crlf:
     sta VERA_H
 
     ;Print footer
+    lda #2
+    sta TMP2_IDX
     ldy #255
     ldx #0
 printloop:
     iny
+    x816_code_dbr_on
     lda (TMP1_ADR),y
+    x816_code_dbr_off
     beq nextrow
     cmp #':'            ;Colon is a markup for start of shortcut description
     bne :+
@@ -425,15 +461,14 @@ printloop:
     bra printloop
 
 nextrow:
+    dec TMP2_IDX
+    beq :+
     stz VERA_L
     inc VERA_M
-    sec
-    lda VERA_M
-    sbc screen_height
-    sbc #VERA_BUFADR_M  ;End if we are at row SCREEN_HEIGHT
-    bcc printloop
+    ldx #0
+    bra printloop
 
-    rts
+:   rts
 .endproc
 ;******************************************************************************
 ;Function name.......: screen_print_default_footer
@@ -602,6 +637,7 @@ row2:
     ;Select start bank
     lda SCR_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     ;Setup temporary vector to fetch text from buffer
     lda SCR_ADR+1
@@ -627,7 +663,9 @@ row2:
 
     ;Get length of mem page where we start printing
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta len
 
     ;Set offset +5 to skip mem page metadata
@@ -643,7 +681,9 @@ print_loop:
     bcs next_mem_page
     
 fetch_char:
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
 
     ;Check if end of line
     cmp #LF
@@ -685,11 +725,13 @@ next_char:
 next_mem_page:
     stz TMP1_ADR        ;Set offset to 0 to read mem page metadata
 
+    x816_data_dbr_on TMP1_BNK
     ldy #2
     lda (TMP1_ADR),y    ;Next bank
     tax                 ;Temp store next bank in X
     ldy #3
     lda (TMP1_ADR),y    ;Next page
+    x816_data_dbr_off
     bne :+                  
     bra clear_bottom    ;and exit
     
@@ -700,7 +742,9 @@ next_mem_page:
     sta TMP1_BNK
 
     ldy #4              ;Get next page len
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta len
     beq next_mem_page   ;If next page len=0, do it again
 
@@ -857,10 +901,13 @@ exit:
     
     lda LNV_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     ;Get length of first memory page we're printing from
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (LNV_ADR),y
+    x816_data_dbr_off
     sta page_len
 
     ;Offset 5 to skip mem page metadata
@@ -880,7 +927,9 @@ print_loop:
     bcs next_page
 
     ;Get char to print
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     cmp #LF                 ;Abort if we get lf
     bne :+ 
     bra clean_line          ;Prints blank spaces to end of line
@@ -914,11 +963,13 @@ print_loop:
 next_page:
     stz TMP1_ADR            ;Restore to read mem page metadata
     
+    x816_data_dbr_on TMP1_BNK
     ldy #2
     lda (TMP1_ADR),y        ;Next bank
     tax
     ldy #3
     lda (TMP1_ADR),y        ;Next page
+    x816_data_dbr_off
     beq clean_line          ;If 0, we're at end of file, clean end of line and exit
 
     sta TMP1_ADR+1
@@ -928,7 +979,9 @@ next_page:
 
     ;Get next page len
     ldy #4         
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta page_len
     beq next_page
 

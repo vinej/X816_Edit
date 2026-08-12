@@ -43,13 +43,31 @@ bridge_addr = bridge_call+12
     .endmacro
 .endif
 
-.if target_mem=target_ram
+.if target_mem=target_rom
     .macro bridge_call addr
-        jsr addr
+        jsr bridge_call
+    .endmacro
+.elseif target_mem=target_x816
+    .macro bridge_call addr
+        .if addr = KERNAL_GETIN
+            jsr x816_kernal_getin
+        .elseif addr = KERNAL_CHROUT
+            jsr x816_kernal_chrout
+        .elseif addr = KERNAL_MEMTOP
+            jsr x816_kernal_memtop
+        .elseif addr = KERNAL_SCREEN_MODE
+            jsr x816_kernal_screen_mode
+        .elseif addr = KERNAL_OPEN
+            jsr x816_kernal_notfound
+        .elseif addr = KERNAL_CHKIN
+            jsr x816_kernal_notfound
+        .else
+            jsr x816_kernal_noop
+        .endif
     .endmacro
 .else
     .macro bridge_call addr
-        jsr bridge_call
+        jsr addr
     .endmacro
 .endif
 

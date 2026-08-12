@@ -118,6 +118,128 @@
 ;Returns.............: Nothing
 ;Error returns.......: Nothing
 .proc mem_init
+.if ::target_mem=target_x816
+    lda #X816_EDIT_BASE_BANK
+    sta mem_start
+    sta CRS_BNK
+    sta LNV_BNK
+    sta SCR_BNK
+    sta mem_run_defrag_page
+    sta BNK_SEL
+
+    lda #X816_EDIT_LAST_BANK
+    sta mem_top
+
+    lda #X816_EDIT_MAP_BANK
+    sta TMP1_BNK
+    lda #X816_EDIT_MAP_PAGE
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+
+    ; The allocation bitmap lives in the last four pages of the editor region.
+    x816_data_dbr_on TMP1_BNK
+    lda #0
+    ldx #3
+clear_map_page:
+    ldy #0
+:   sta (TMP1_ADR),y
+    iny
+    bne :-
+    inc TMP1_ADR+1
+    dex
+    bne clear_map_page
+
+    ldy #0
+:   sta (TMP1_ADR),y
+    iny
+    cpy #$e0
+    bne :-
+
+    ldy #0
+    sty TMP1_ADR
+    lda #X816_EDIT_MAP_PAGE
+    sta TMP1_ADR+1
+    ldx #$1f
+mark_null_pages:
+    lda #1
+    sta (TMP1_ADR),y
+    clc
+    lda TMP1_ADR
+    adc #$20
+    sta TMP1_ADR
+    bcc :+
+    inc TMP1_ADR+1
+:   dex
+    bne mark_null_pages
+
+    ;The base bank's first pages are never allocatable: pages $00-$07 are the
+    ;editor's flat scratch (common.inc), and page X816_EDIT_BASE_PAGE is the
+    ;head of the text buffer. Two map bytes cover all nine.
+    stz TMP1_ADR
+    lda #X816_EDIT_MAP_PAGE
+    sta TMP1_ADR+1
+    lda #$ff
+    sta (TMP1_ADR),y
+    iny
+    lda #(1 << (X816_EDIT_BASE_PAGE & 7))
+    sta (TMP1_ADR),y
+    ldy #0
+
+    lda #$df
+    sta TMP1_ADR
+    lda #$ff
+    sta TMP1_ADR+1
+    ldy #0
+    lda #X816_EDIT_RESERVED_TOP_MASK
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda #X816_EDIT_BASE_PAGE
+    sta CRS_ADR+1
+    sta LNV_ADR+1
+    sta SCR_ADR+1
+    sta mem_run_defrag_page+1
+
+    stz CRS_ADR
+    stz LNV_ADR
+    stz SCR_ADR
+
+    stz CRS_IDX
+    stz LNV_IDX
+    stz SCR_IDX
+
+    x816_data_dbr_on CRS_BNK
+    lda #0
+    ldy #0
+:   sta (CRS_ADR),y
+    iny
+    cpy #5
+    bne :-
+    x816_data_dbr_off
+
+    ;Free pages: X816_EDIT_PAGE_COUNT less the eight scratch pages, the head
+    ;page, the thirty null-link sentinels in banks $C2-$DF and the four pages
+    ;the allocation bitmap itself occupies.
+    lda #<X816_EDIT_FREE_PAGES
+    sta mem_blocks_free
+    lda #>X816_EDIT_FREE_PAGES
+    sta mem_blocks_free+1
+
+    lda #1
+    sta mem_cur_line
+    sta mem_cur_col
+
+    stz mem_cur_line+1
+    stz mem_cur_line+2
+
+    stz mem_cur_col+1
+    stz mem_cur_col+2
+
+    stz mem_modified
+
+    rts
+.endif
+
     ;Get mem top
     bridge_setaddr KERNAL_MEMTOP
     sec
@@ -269,6 +391,214 @@ init_map_exit:
 .endproc
 
 ;**********************************************************
+;Function name.......: x816_edit_mem_smoke
+;Description.........: X816-only allocator/link smoke test
+;Returns.............: A=0 on success, A=1 on failure. Detail byte at $07fc.
+.if ::target_mem=target_x816
+.export x816_edit_mem_smoke
+
+.macro x816_smoke_assert_a expected, detail
+    cmp #expected
+    beq :+
+    lda #detail
+    jmp fail
+:
+.endmacro
+
+.macro x816_smoke_assert_x expected, detail
+    cpx #expected
+    beq :+
+    lda #detail
+    jmp fail
+:
+.endmacro
+
+.macro x816_smoke_assert_y expected, detail
+    cpy #expected
+    beq :+
+    lda #detail
+    jmp fail
+:
+.endmacro
+
+;The map byte holding the head page and the first allocations, and the two
+;pages mem_alloc must hand out first. Spelled as arithmetic on the layout
+;constants: pinning them to literals is how a test keeps passing after the
+;thing it tests has moved.
+X816_SMOKE_MAPBYTE = X816_EDIT_BASE_PAGE / 8
+X816_SMOKE_HEADBIT = 1 << (X816_EDIT_BASE_PAGE & 7)
+X816_SMOKE_PAGE1   = X816_EDIT_BASE_PAGE + 1
+X816_SMOKE_PAGE2   = X816_EDIT_BASE_PAGE + 2
+
+.proc x816_edit_mem_smoke
+    stz x816_mem_smoke_detail
+    jsr mem_init
+
+    lda mem_blocks_free
+    x816_smoke_assert_a <X816_EDIT_FREE_PAGES, 1
+    lda mem_blocks_free+1
+    x816_smoke_assert_a >X816_EDIT_FREE_PAGES, 2
+
+    ;Map byte 0 covers the scratch pages, all eight of them. It must read as
+    ;fully allocated before and after everything below: the whole point of
+    ;reserving them is that file_buf and the caller's backup can never be
+    ;handed out as text pages.
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #0
+    jsr smoke_read
+    x816_smoke_assert_a $ff, 3
+
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #X816_SMOKE_MAPBYTE
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_HEADBIT, 4
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #4
+    jsr smoke_read
+    x816_smoke_assert_a 0, 5
+
+    jsr mem_alloc
+    x816_smoke_assert_y X816_EDIT_BASE_BANK, 6
+    x816_smoke_assert_x X816_SMOKE_PAGE1, 7
+
+    lda mem_blocks_free
+    x816_smoke_assert_a <(X816_EDIT_FREE_PAGES-1), 8
+    lda mem_blocks_free+1
+    x816_smoke_assert_a >(X816_EDIT_FREE_PAGES-1), 9
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #2
+    jsr smoke_read
+    x816_smoke_assert_a X816_EDIT_BASE_BANK, 10
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #3
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_PAGE1, 11
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE1
+    ldy #0
+    jsr smoke_read
+    x816_smoke_assert_a X816_EDIT_BASE_BANK, 12
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE1
+    ldy #1
+    jsr smoke_read
+    x816_smoke_assert_a X816_EDIT_BASE_PAGE, 13
+
+    jsr mem_alloc
+    x816_smoke_assert_y X816_EDIT_BASE_BANK, 14
+    x816_smoke_assert_x X816_SMOKE_PAGE2, 15
+
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #X816_SMOKE_MAPBYTE
+    jsr smoke_read
+    x816_smoke_assert_a (X816_SMOKE_HEADBIT | X816_SMOKE_HEADBIT<<1 | X816_SMOKE_HEADBIT<<2), 16
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #3
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_PAGE2, 17
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE2
+    ldy #3
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_PAGE1, 18
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE1
+    ldy #1
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_PAGE2, 19
+
+    ldy #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE2
+    jsr mem_free
+    bcc :+
+    lda #20
+    jmp fail
+:
+
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #X816_SMOKE_MAPBYTE
+    jsr smoke_read
+    x816_smoke_assert_a (X816_SMOKE_HEADBIT | X816_SMOKE_HEADBIT<<1), 21
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #3
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_PAGE1, 22
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE1
+    ldy #1
+    jsr smoke_read
+    x816_smoke_assert_a X816_EDIT_BASE_PAGE, 23
+
+    ldy #X816_EDIT_BASE_BANK
+    ldx #X816_SMOKE_PAGE1
+    jsr mem_free
+    bcc :+
+    lda #24
+    jmp fail
+:
+
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #X816_SMOKE_MAPBYTE
+    jsr smoke_read
+    x816_smoke_assert_a X816_SMOKE_HEADBIT, 25
+
+    lda #X816_EDIT_BASE_BANK
+    ldx #X816_EDIT_BASE_PAGE
+    ldy #3
+    jsr smoke_read
+    x816_smoke_assert_a 0, 26
+
+    lda #X816_EDIT_MAP_BANK
+    ldx #X816_EDIT_MAP_PAGE
+    ldy #0
+    jsr smoke_read
+    x816_smoke_assert_a $ff, 27
+
+    lda mem_blocks_free
+    x816_smoke_assert_a <X816_EDIT_FREE_PAGES, 28
+    lda mem_blocks_free+1
+    x816_smoke_assert_a >X816_EDIT_FREE_PAGES, 29
+
+    jsr mem_init
+    lda #0
+    rts
+
+fail:
+    sta x816_mem_smoke_detail
+    jsr mem_init
+    lda #1
+    rts
+
+smoke_read:
+    sta TMP1_BNK
+    stx TMP1_ADR+1
+    stz TMP1_ADR
+    x816_data_dbr_on TMP1_BNK
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    rts
+.endproc
+.endif
+
+;**********************************************************
 ;Function name.......: mem_is_head
 ;Description.........: Is page head of buffer, i.e.
 ;                      bank mem_start+1, page $a0
@@ -278,6 +608,19 @@ init_map_exit:
 ;                      C = 0    Is not head
 ;Error returns.......: None
 .proc mem_is_head
+.if ::target_mem=target_x816
+    cpy #X816_EDIT_BASE_BANK
+    bne :+
+    cpx #X816_EDIT_BASE_PAGE
+    bne :+
+
+    sec
+    rts
+
+:   clc
+    rts
+.endif
+
     dey
     cpy mem_start
     bne :+
@@ -358,6 +701,7 @@ at_bof:
     ;Copy cursor pointer to temp pointer
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     lda CRS_ADR+1
     sta TMP1_ADR+1
     stz TMP1_ADR
@@ -366,22 +710,31 @@ at_bof:
     lda CRS_IDX
     ina
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     cmp (TMP1_ADR),y
+    x816_data_dbr_restore
     bcc not_eof
 
 :   ldy #3
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Next page
+    x816_data_dbr_off
     tax
     beq at_eof              ;Next page=0 => there is no next page, i.e. eof
 
     tax
     ldy #2
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Next bank
+    x816_data_dbr_off
     sta BNK_SEL
+    sta TMP1_BNK
     stx TMP1_ADR+1
 
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Next page len
+    x816_data_dbr_off
     beq :-                  ;Loop until we find a non zero len page
 
 not_eof:
@@ -405,6 +758,185 @@ at_eof:
 ;                      X=page (address MSB)
 ;Error returns.......: X=0 if memory full
 .proc mem_alloc
+.if ::target_mem=target_x816
+    lda #X816_EDIT_MAP_BANK
+    sta TMP1_BNK
+    lda #X816_EDIT_MAP_PAGE
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+
+    stz map_index
+    stz map_index+1
+    lda #<X816_EDIT_MAP_BYTES
+    sta bytes_left
+    lda #>X816_EDIT_MAP_BYTES
+    sta bytes_left+1
+
+    ldy #0
+x816_scan_map:
+    lda bytes_left
+    ora bytes_left+1
+    bne :+
+    ldx #0
+    rts
+
+:   x816_data_dbr_on TMP1_BNK
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    cmp #$ff
+    bne x816_free_mem_found
+
+    inc TMP1_ADR
+    bne :+
+    inc TMP1_ADR+1
+
+:   inc map_index
+    bne :+
+    inc map_index+1
+
+:   lda bytes_left
+    bne :+
+    dec bytes_left+1
+:   dec bytes_left
+    bra x816_scan_map
+
+x816_free_mem_found:
+    sta value
+
+    ldx #0
+x816_find_bit:
+    x816_code_dbr_on
+    lda bitmask,x
+    x816_code_dbr_off
+    and value
+    beq x816_mark_page_allocated
+    inx
+    bra x816_find_bit
+
+x816_mark_page_allocated:
+    x816_code_dbr_on
+    lda bitmask,x
+    x816_code_dbr_off
+    ora value
+    x816_data_dbr_on_keep_a TMP1_BNK
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda map_index
+    sta page_index
+    lda map_index+1
+    sta page_index+1
+    asl page_index
+    rol page_index+1
+    asl page_index
+    rol page_index+1
+    asl page_index
+    rol page_index+1
+
+    txa
+    clc
+    adc page_index
+    sta newpage
+    lda page_index+1
+    adc #0
+    clc
+    adc #X816_EDIT_BASE_BANK
+    sta newbank
+
+    x816_data_dbr_on CRS_BNK
+    ldy #2
+    lda (CRS_ADR),y
+    x816_data_dbr_off
+    sta nextbank
+
+    x816_data_dbr_on CRS_BNK
+    ldy #3
+    lda (CRS_ADR),y
+    x816_data_dbr_off
+    sta nextpage
+
+    lda newpage
+    x816_data_dbr_on_keep_a CRS_BNK
+    ldy #3
+    sta (CRS_ADR),y
+    x816_data_dbr_off
+
+    lda newbank
+    x816_data_dbr_on_keep_a CRS_BNK
+    ldy #2
+    sta (CRS_ADR),y
+    x816_data_dbr_off
+
+    lda newbank
+    sta TMP1_BNK
+    sta BNK_SEL
+    lda newpage
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+
+    lda CRS_BNK
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #0
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda CRS_ADR+1
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #1
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda nextbank
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #2
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda nextpage
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #3
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda #0
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #4
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda nextpage
+    beq x816_alloc_exit
+
+    sta TMP2_ADR+1
+    stz TMP2_ADR
+    lda nextbank
+    sta TMP1_BNK
+    sta BNK_SEL
+
+    lda newbank
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #0
+    sta (TMP2_ADR),y
+    x816_data_dbr_off
+
+    lda newpage
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #1
+    sta (TMP2_ADR),y
+    x816_data_dbr_off
+
+x816_alloc_exit:
+    ldy newbank
+    ldx newpage
+
+    lda mem_blocks_free
+    bne :+
+    dec mem_blocks_free+1
+:   dec mem_blocks_free
+
+    rts
+.endif
+
     ;Select RAM bank mem_start
     lda mem_start
     sta BNK_SEL
@@ -562,6 +1094,9 @@ newpage = tempvars+1        ;1 byte
 value = tempvars+2          ;1 byte
 nextbank = tempvars+3       ;1 byte
 nextpage = tempvars + 4     ;1 byte
+map_index = tempvars + 5    ;2 bytes
+bytes_left = tempvars + 7   ;2 bytes
+page_index = tempvars + 9   ;2 bytes
 
 bitmask:
     .byt 1, 2, 4, 8, 16, 32, 64, 128
@@ -578,6 +1113,160 @@ bitmask:
     ;Save input params
     sty bank
     stx page
+
+.if ::target_mem=target_x816
+    cpy #X816_EDIT_BASE_BANK
+    bcc x816_is_reserved
+    cpy #X816_EDIT_LAST_BANK
+    bcc :+
+    bne x816_is_reserved
+    cpx #X816_EDIT_MAP_PAGE
+    bcs x816_is_reserved
+
+:   cpx #0
+    bne :+
+x816_is_reserved:
+    sec
+    rts
+
+:   tya
+    sec
+    sbc #X816_EDIT_BASE_BANK
+    sta map_index
+    stz map_index+1
+    asl map_index
+    rol map_index+1
+    asl map_index
+    rol map_index+1
+    asl map_index
+    rol map_index+1
+    asl map_index
+    rol map_index+1
+    asl map_index
+    rol map_index+1
+
+    lda page
+    lsr
+    lsr
+    lsr
+    clc
+    adc map_index
+    sta TMP1_ADR
+    lda map_index+1
+    adc #X816_EDIT_MAP_PAGE
+    sta TMP1_ADR+1
+
+    lda page
+    and #7
+    tax
+
+    lda #X816_EDIT_MAP_BANK
+    sta TMP1_BNK
+    ldy #0
+    x816_data_dbr_on TMP1_BNK
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    sta value
+
+    x816_code_dbr_on
+    lda bitmask,x
+    x816_code_dbr_off
+    and value
+    bne :+
+    clc
+    rts
+
+:   x816_code_dbr_on
+    lda bitmask,x
+    x816_code_dbr_off
+    eor #255
+    and value
+    x816_data_dbr_on_keep_a TMP1_BNK
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda bank
+    sta TMP1_BNK
+    sta BNK_SEL
+    lda page
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+
+    x816_data_dbr_on TMP1_BNK
+    ldy #0
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    sta prev
+
+    x816_data_dbr_on TMP1_BNK
+    ldy #1
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    sta prev+1
+
+    x816_data_dbr_on TMP1_BNK
+    ldy #2
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    sta next
+
+    x816_data_dbr_on TMP1_BNK
+    ldy #3
+    lda (TMP1_ADR),y
+    x816_data_dbr_off
+    sta next+1
+
+    lda prev+1
+    beq x816_next_page_link
+
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+    lda prev
+    sta TMP1_BNK
+    sta BNK_SEL
+
+    lda next
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #2
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda next+1
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #3
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+x816_next_page_link:
+    lda next+1
+    beq x816_free_exit
+
+    sta TMP1_ADR+1
+    stz TMP1_ADR
+    lda next
+    sta TMP1_BNK
+    sta BNK_SEL
+
+    lda prev
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #0
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+    lda prev+1
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ldy #1
+    sta (TMP1_ADR),y
+    x816_data_dbr_off
+
+x816_free_exit:
+    inc mem_blocks_free
+    bne :+
+    inc mem_blocks_free+1
+
+:   clc
+    rts
+.endif
     
     ;Check if bank is reserved, exit without deallocating if true
     cpy mem_start
@@ -713,6 +1402,8 @@ bank = tempvars     ;1 byte
 page = tempvars+1   ;1 byte
 prev = tempvars+2   ;2 bytes
 next = tempvars+4   ;2 bytes
+value = tempvars+6  ;1 byte
+map_index = tempvars+7 ;2 bytes
 
 bitmask:
     .byt 1,2,4,8,16,32,64,128
@@ -731,6 +1422,10 @@ bitmask:
 ;Returns.............: Nothing
 ;Error returns.......: Nothing
 .proc mem_run_defrag
+.if ::target_mem=target_x816
+    rts
+.endif
+
     ;Set pointers to next bank/page to defrag, which is stored in
     ;mem_run_defrag_page (2 bytes)
     lda mem_run_defrag_page
@@ -976,13 +1671,16 @@ nextpage_index2 = tempvars +3   ;1 byte
 
     ;Set pointers to page to push
     sty BNK_SEL
+    sty TMP1_BNK
     stx TMP1_ADR+1
     stz TMP1_ADR
     stx TMP2_ADR+1
 
     ;Get page len
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta len
 
     ;If len = 0 there's nothing to push. Set len = 1 and exit
@@ -990,13 +1688,17 @@ nextpage_index2 = tempvars +3   ;1 byte
     bne :+
 
     lda #1
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
     clc
     rts
     
     ;Save last char of page, if there is overflow to return later
 :   ldy #255
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta last_char
 
     ;Is start index >= 250, skip push routine
@@ -1014,8 +1716,12 @@ nextpage_index2 = tempvars +3   ;1 byte
     ldy #249
 
 loop:
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP2_ADR),y
+    x816_data_dbr_restore
 
     cpy start
     beq setlen
@@ -1039,7 +1745,9 @@ setlen:
 :   inc len
     lda len
     ldy #4
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
     
     clc
     rts
@@ -1065,24 +1773,34 @@ last_char = tempvars+2  ;1 byte
     ;Check if we are at beginning of mem page, and if there is room to insert
     ;the char in previous mem page
     lda CRS_IDX
-    bne pushforward
+    beq :+
+    jmp pushforward
 
-    lda CRS_BNK
+:   lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     ldy #1
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
-    beq pushforward
+    x816_data_dbr_off
+    bne :+
+    jmp pushforward
+:
     tax
     ldy #0
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     sta BNK_SEL
     sta TMP1_BNK
     stx TMP1_ADR+1
     stz TMP1_ADR
 
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     cmp #251
     bcs pushforward
 
@@ -1092,12 +1810,16 @@ last_char = tempvars+2  ;1 byte
     adc #5  ;Add 5 to skip mem page metadata
     tay
     pla     ;Get char from stack
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
 
     inx     ;Increase prev page len
     txa
     ldy #4
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
 
     dex             ;Decrease to represent last index in prev page
 
@@ -1152,15 +1874,20 @@ pushforward:
     pha
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     
     ldy #3
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     beq alloc
     
     tax
     
     ldy #2
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     
     stx TMP1_ADR+1
     stz TMP1_ADR
@@ -1168,7 +1895,9 @@ pushforward:
     sta TMP1_BNK
 
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     cmp #251
     bcs alloc
     
@@ -1180,7 +1909,9 @@ pushforward:
     pla
     ldy #5
     stz TMP1_ADR
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
     bra insert
 
 alloc:
@@ -1188,26 +1919,34 @@ alloc:
     cpx #0          ;Mem full?
     beq mem_full
     sty BNK_SEL
+    sty TMP1_BNK
     stx TMP1_ADR+1
     stz TMP1_ADR
     
     pla
     ldy #5
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
     ldy #4
     lda #1
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
 
 insert:
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     lda #5
     sta CRS_ADR
 
     pla
     ldy CRS_IDX
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (CRS_ADR),y
+    x816_data_dbr_restore
 
     stz CRS_ADR  
 
@@ -1353,10 +2092,13 @@ default:
 .proc mem_get_value
     ldy CRS_BNK
     sty BNK_SEL
+    sty TMP1_BNK
     ldy #5
     sty CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     stz CRS_ADR
     rts
 .endproc
@@ -1375,11 +2117,14 @@ default:
 
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     clc
     lda CRS_IDX
     adc #5
     tay
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     bne :+
     inc at_lf
@@ -1390,10 +2135,13 @@ default:
 
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     lda CRS_IDX
     ina
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     cmp (CRS_ADR),y
+    x816_data_dbr_restore
     beq goto_eof
     
     sec
@@ -1403,23 +2151,33 @@ default:
 :   ;Is cursor at end of mem page?
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     lda CRS_IDX
     ina
+    x816_data_dbr_on TMP1_BNK
     cmp (CRS_ADR),y
+    x816_data_dbr_restore
     bcc default
 
     ;Go to next mem page
 :   ldy #2
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     tax
     ldy #3
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     stx CRS_BNK
     stx BNK_SEL
+    stx TMP1_BNK
     sta CRS_ADR+1
     stz CRS_IDX
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     beq :-              ;Len = 0, continue searching...
 
     clc
