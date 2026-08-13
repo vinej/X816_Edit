@@ -654,25 +654,42 @@ smoke_read:
     rts
 
     ;Search for head of buffer, return if we find a char before that
+    ;
+    ;X816: every (TMP1_ADR),y below is a BUFFER PAGE read and needs the page's
+    ;bank in DBR -- TMP1_BNK tracks it exactly where the X16 code moved
+    ;BNK_SEL. This proc was never converted: with DBR=$00 the walk read bank
+    ;$00, took whatever it found there for the prev-page link, and answered
+    ;"at beginning of file" more or less at random. mem_crs_step_left asks it
+    ;FIRST, so vertical movement died here as often as anywhere. The
+    ;x816_data_dbr_off macro ends in `cmp #0`, which is what lets the beq/bne
+    ;after each read keep meaning "was the byte zero".
 :   lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     lda CRS_ADR+1
     sta TMP1_ADR+1
     stz TMP1_ADR
 
 :   ldy #1
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Prev page
+    x816_data_dbr_off
     beq at_bof
 
     tax
     ldy #0
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Prev Bank
+    x816_data_dbr_off
     sta BNK_SEL
+    sta TMP1_BNK
     stx TMP1_ADR+1          ;Prev page
-    
+
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y        ;Page len
+    x816_data_dbr_off
     beq :-                  ;Loop until we find non zero len page
 
 not_bof:
@@ -707,12 +724,18 @@ at_bof:
     stz TMP1_ADR
 
     ;Is cursor index + 1 < page len, we're not at end of mem page, and consequently not at end of file
+    ;
+    ;_KEEP_A, because A is the value being compared. The plain macro is
+    ;phb / LDA bank / pha / plb -- it LOADS A with the bank number, so the
+    ;compare below was testing the bank against the page length instead of
+    ;the cursor index. Banks here are $C1-$DF, page lengths at most 251, so
+    ;the answer was arbitrary and usually wrong.
     lda CRS_IDX
     ina
     ldy #4
-    x816_data_dbr_on TMP1_BNK
+    x816_data_dbr_on_keep_a TMP1_BNK
     cmp (TMP1_ADR),y
-    x816_data_dbr_restore
+    x816_data_dbr_restore           ;plb: clobbers N and Z, but NOT carry
     bcc not_eof
 
 :   ldy #3
@@ -1995,30 +2018,46 @@ mem_full:
     bne default
 
     ;Yes, it was at beginning of page: decrease len of the previous page without moving the cursor pointer
+    ;X816: never converted -- and this arm WRITES through (TMP1_ADR),y (the
+    ;length decrement), so unbracketed it corrupted bank $00 as well as
+    ;misreading the walk. TMP1_BNK shadows the bank exactly where the X16
+    ;code moved BNK_SEL.
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
     lda CRS_ADR+1
     sta TMP1_ADR+1
     stz TMP1_ADR
 
 :   ldy #0
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     tax
     ldy #1
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     sta TMP1_ADR+1
     stx BNK_SEL
+    stx TMP1_BNK
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     beq :-
 
     dea
+    x816_data_dbr_on_keep_a TMP1_BNK
     sta (TMP1_ADR),y
+    x816_data_dbr_restore
 
     tay
     lda #5
     sta TMP1_ADR
+    x816_data_dbr_on TMP1_BNK
     lda (TMP1_ADR),y
+    x816_data_dbr_off
     cmp #LF
     bne :+
     inc at_lf
@@ -2039,22 +2078,29 @@ default:
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     bne :+
     inc at_lf
 
 :   stz CRS_ADR             ;Decrease page len
     ldy #4
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
     dea
     sta (CRS_ADR),y
+    x816_data_dbr_restore
 
     lda #5
     sta CRS_ADR
-    ldy CRS_IDX  
+    ldy CRS_IDX
     iny
 
+    ;X816: ONE bracket around the whole copy loop -- every access is the same
+    ;page, nothing else runs inside, and the loop's own flags come from cpy.
+    x816_data_dbr_on CRS_BNK
 :   lda (CRS_ADR),y         ;Copy text from cursor to page end one step left
     dey
     sta (CRS_ADR),y
@@ -2062,11 +2108,14 @@ default:
     iny
     cpy #251
     bne :-
+    x816_data_dbr_restore
 
     stz CRS_ADR             ;Restore vector
 
     ldy #4
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     bne :+                  ;Mem page len > 0, exit
 
     jsr mem_at_eof          ;Mem page len = 0, check if we are at EOF, if not need to take one step left, otherwise the cursor would be at an undefined position
@@ -2136,14 +2185,38 @@ default:
     lda CRS_BNK
     sta BNK_SEL
     sta TMP1_BNK
+    ;TWO bugs lived in these four lines, and between them the right arrow
+    ;could not move at all.
+    ;
+    ;_KEEP_A: the plain macro loads A with the bank number, so the compare
+    ;tested the bank against the page length instead of the cursor index.
+    ;
+    ;THE FLAGS: x816_data_dbr_restore is a bare plb, and plb sets N and Z from
+    ;the byte it pulled -- the caller's data bank, which is $00 here. So a
+    ;`beq` placed after it tested "is the restored DBR zero", which it always
+    ;is, and mem_crs_step_right reported END OF FILE on every call.
+    ;
+    ;So BRANCH BEFORE RESTORING. php/plp around the restore does not work and
+    ;is worth saying why: the macro above has already pushed the data bank, so
+    ;a php lands ON TOP of it, and then the plb pulls the STATUS byte as the
+    ;bank while the plp pulls the bank as the status. Deciding first costs one
+    ;duplicated restore and no stack games.
     lda CRS_IDX
     ina
     ldy #4
-    x816_data_dbr_on TMP1_BNK
+    x816_data_dbr_on_keep_a TMP1_BNK
+    ;A NAMED label, not `:+`. ca65's anonymous labels are position-relative,
+    ;so adding one here silently re-pointed the `bcc :+` further up -- the one
+    ;that skips to "is cursor at end of mem page" -- at this block instead,
+    ;and its extra plb then unbalanced the stack. ca65 said so ("No reference
+    ;to unnamed label"); the warning was the only thing that did.
     cmp (CRS_ADR),y
+    bne eof_not_page_end
     x816_data_dbr_restore
-    beq goto_eof
-    
+    jmp goto_eof
+eof_not_page_end:
+    x816_data_dbr_restore
+
     sec
     ldx #0
     rts
@@ -2152,11 +2225,12 @@ default:
     lda CRS_BNK
     sta BNK_SEL
     sta TMP1_BNK
+    ;_KEEP_A again: A is the cursor index being compared, not scratch.
     lda CRS_IDX
     ina
-    x816_data_dbr_on TMP1_BNK
+    x816_data_dbr_on_keep_a TMP1_BNK
     cmp (CRS_ADR),y
-    x816_data_dbr_restore
+    x816_data_dbr_restore           ;plb: carry survives, which is what bcc needs
     bcc default
 
     ;Go to next mem page
@@ -2238,20 +2312,33 @@ default:
     lda CRS_IDX
     bne default
 
+    ;X816: this walk was never converted -- every (CRS_ADR),y here follows
+    ;DBR, and with DBR=$00 it read bank $00 instead of the buffer page. It
+    ;mostly LOOKED fine because the common case, stepping left inside a page,
+    ;is the plain `dec CRS_IDX` below and touches no memory -- the misreads
+    ;only fired crossing a page boundary and in the LF check at exit, which is
+    ;precisely what line-start/line-end walks (and so the up and down arrows)
+    ;live on. CRS_BNK is the bank byte the page links carry.
     lda CRS_BNK     ;Yes
     sta BNK_SEL
 
 :   ldy #1          ;Prev page
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     tax
     ldy #0          ;Prev bank
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     sta CRS_BNK
     sta BNK_SEL
     stx CRS_ADR+1
 
     ldy #4          ;Page len
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     beq :-          ;Len = 0, continue searching...
 
     dea             ;Set index to last char = len-1
@@ -2264,19 +2351,21 @@ default:
 
 exit:
     ldx #0
-    
+
     lda CRS_BNK
     sta BNK_SEL
-    
+
     clc             ;Check if now standing at LF
     lda CRS_IDX
     adc #5
     tay
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     bne :+
     ldx #1          ;Yes
- 
+
  :  clc
     rts
 .endproc
@@ -2310,10 +2399,16 @@ loop:
 :   lda CRS_BNK
     sta BNK_SEL
 
+    ;X816: the read of the character under the cursor follows DBR. Unbracketed
+    ;it read bank $00, never saw an LF, and this loop walked all the way to
+    ;the start of file -- which is why the up arrow left the cursor where it
+    ;was: cmd_go_up found itself "at the first line" every time.
     ldy CRS_IDX
     lda #5
     sta CRS_ADR
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     bne loop
 
@@ -2360,31 +2455,44 @@ exit:
     ;First take one step left before we begin searching
     jsr mem_crs_step_left
 
+    ;X816: this walk moves BACKWARDS across pages and the X16 code tracked the
+    ;bank only in BNK_SEL, which is nothing on this machine. TMP1_BNK is the
+    ;shadow -- it is scratch, and nothing called from inside the walk touches
+    ;it (the step_left above runs BEFORE the shadow is set, the step_right at
+    ;`found` runs after the last read).
     ;Get page len
     lda CRS_BNK
     sta BNK_SEL
+    sta TMP1_BNK
 
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     sta pagelen
 
 check_first_char:
     lda CRS_BNK
     sta BNK_SEL
-    
+    sta TMP1_BNK
+
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #32
     bne loop
-    
+
     inc counter
     bra found
 
 loop:
     ldy CRS_IDX
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #32
     beq found
     cmp #LF
@@ -2403,20 +2511,27 @@ loop:
 
 prevpage:
     stz CRS_ADR
-    
-    ;Get prev page
+
+    ;Get prev page (header reads: still the CURRENT page's bank)
     ldy #0
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     tax
     ldy #1
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     beq notfound
     stx BNK_SEL
+    stx TMP1_BNK            ;X816: the shadow moves WITH the walk
     sta CRS_ADR+1
 
-    ;Get prev page len
+    ;Get prev page len (now the PREV page's bank)
     ldy #4
+    x816_data_dbr_on TMP1_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     sta pagelen
     beq prevpage
     
@@ -2473,8 +2588,12 @@ loop:
     lda #5
     sta CRS_ADR
 
+    ;X816: bracket per iteration, from CRS_BNK EACH time -- the step_right in
+    ;this loop moves the cursor across pages and updates CRS_BNK when it does.
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     beq exit
 

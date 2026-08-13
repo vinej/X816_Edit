@@ -259,7 +259,9 @@ merge_del:
     lda CRS_BNK
     sta BNK_SEL
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK    ;X816: buffer read
     lda (CRS_ADR),y
+    x816_data_dbr_off
     stz CRS_ADR
     cmp #32
     beq :+
@@ -401,7 +403,9 @@ get_char:
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK    ;X816: buffer read
     lda (CRS_ADR),y
+    x816_data_dbr_off
     stz CRS_ADR
 
     cmp #LF                 ;If char=LF
@@ -502,7 +506,9 @@ auto_indent_loop:
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK    ;X816: buffer read (auto-indent scan)
     lda (CRS_ADR),y
+    x816_data_dbr_off
     stz CRS_ADR
     cmp #32
     bne auto_indent_stop
@@ -1071,12 +1077,17 @@ stepto_column:
     beq exit
 
 :   ;If char = LF then exit
+    ;X816: buffer read -- needs the page's bank in DBR, like the same walk in
+    ;cmd_go_down and mem_crs_move_to_line_end. Unbracketed, this read of the
+    ;column-restore loop came from bank $00.
     lda CRS_BNK
     sta BNK_SEL
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     beq exit
     stz CRS_ADR
@@ -1214,7 +1225,9 @@ loop_2:
     lda #5
     sta CRS_ADR
     ldy CRS_IDX
+    x816_data_dbr_on CRS_BNK    ;X816: buffer read, as in cmd_go_up
     lda (CRS_ADR),y
+    x816_data_dbr_off
     cmp #LF
     beq exit            ;Line separator found
 
@@ -1611,7 +1624,12 @@ search_loop:
     ldy CRS_IDX
     lda #5
     sta CRS_ADR
+    ;X816: the buffer char needs the page bank; the needle at (TMP2_ADR),y is
+    ;a bank-$00 string and needs DBR back at $00 -- so the bracket closes
+    ;BETWEEN the two reads. dbr_off does not touch A, so the char survives.
+    x816_data_dbr_on CRS_BNK
     lda (CRS_ADR),y
+    x816_data_dbr_off
     ldy match
     cmp (TMP2_ADR),y
     beq char_match

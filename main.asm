@@ -545,8 +545,23 @@ mainloop:
     beq shutdown
 
 .if (::target_mem=target_x816)
-    lda #1
-    sta irq_flag
+    ;PACE THE LOOP TO VSYNC. This used to be `lda #1 / sta irq_flag`, which
+    ;sets the flag the loop is about to wait on -- so the wait never waited and
+    ;the body ran flat out at 8 (or 14) MHz instead of sixty times a second.
+    ;
+    ;Everything below is written for one pass per frame. cursor_toggle counts
+    ;30 passes to a blink, which is half a second at 60 Hz and a few
+    ;milliseconds at full speed: on hardware the cursor strobed rather than
+    ;blinked, and screen_update_status repainted the line and column numbers
+    ;at the same rate, so they flickered. Both were the same bug.
+    ;
+    ;The editor installs no IRQ of its own here -- irq_init is a no-op on
+    ;X816 and the kernel's own VSYNC handler already owns the slot -- so the
+    ;frame edge is READ rather than waited for: K_IRQ_FRAMES returns the
+    ;kernel's 16-bit VSYNC counter, and a change in it is a new frame. That
+    ;also means a slow pass costs a frame rather than desynchronising a
+    ;counter nobody owns.
+    jsr x816_frame_edge
 .endif
 
     lda irq_flag                        ;Wait for IRQ flag

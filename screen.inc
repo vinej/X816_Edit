@@ -236,7 +236,14 @@ newbuffer_loop:
     rts
 
 program_name:
+.if ::target_mem=target_x816
+    ;The machine's name, not the one this was forked from. appversion.inc's
+    ;signature block keeps "x16edit" deliberately -- that string is upstream's
+    ;and is what a version probe looks for.
+    .byt "X816edit",0
+.else
     .byt "x16edit",0
+.endif
 
 new_buffer_msg:
     .byt "new buffer"
@@ -306,7 +313,15 @@ line_brk_enc:
     bne :+
     ldx #10
 
-:   lda brk_enc_lf,x
+    ;X816: brk_enc_lf is a constant in the editor blob and the status bar is
+    ;repainted from the main loop with DBR=$00, so this needs the same code-bank
+    ;bracket printlabel below already uses. The loop stops on a zero byte, which
+    ;made the wrong bank worse than a wrong label: on the emulator bank $00
+    ;reads back zero and nothing prints, but on the board it prints whatever is
+    ;there until a zero turns up.
+:   x816_code_dbr_on
+    lda brk_enc_lf,x
+    x816_code_dbr_off
     beq :+
     jsr screen_put_uc_char
     inx

@@ -54,12 +54,38 @@ keyboard_shortcut_count = 28
 ;Error returns.......: None
 .proc keyboard_init
     ;Copy default shortcut table
+    ;
+    ;X816: the two halves of this copy live in DIFFERENT BANKS. `keyval` is a
+    ;constant in the editor blob, which is linked into the firmware bank, while
+    ;keyboard_ctrl_keyval is VARS -- bank $00. Absolute addressing follows DBR,
+    ;so the read needs the code bank and the write needs $00, and the bracket
+    ;has to sit between them rather than around the loop.
+    ;
+    ;Without it this copied 28 bytes of whatever bank $00 holds at the blob's
+    ;own addresses into the shortcut table, and EVERY Ctrl command -- Ctrl+S,
+    ;Ctrl+O, Ctrl+X -- was then matched against that. Silent: the editor comes
+    ;up perfectly and simply has no commands, except where a stray byte matches
+    ;and runs the wrong one.
     ldx #0
-:   lda keyval,x
+:   x816_code_dbr_on
+    lda keyval,x
+    x816_code_dbr_off
     sta keyboard_ctrl_keyval,x
     inx
     cpx #keyboard_shortcut_count
     bne :-
+
+.if ::target_mem=target_x816
+    ;Return BEFORE the config-name copy below, not after it. The copy stages
+    ;the rc-file name into clipboard_mem for the KERNAL open that x816 never
+    ;does -- and clipboard_mem is $A400, which on this machine is $00:A400,
+    ;inside the near-data region x816-lib.scm gives the CALLER. Twelve bytes
+    ;of durexForth's or SuperBasic's memory were clobbered at every editor
+    ;start for a file that was never going to be read. (The clipboard itself
+    ;still lives there on x816 -- cut/copy/paste stomp the caller and need a
+    ;new home; that is an open item, this just stops the free hit at entry.)
+    rts
+.endif
 
     ;Copy config file name to clipboard mem, temporarily used for this purpose during editor setup
     lda mem_start
@@ -70,10 +96,6 @@ keyboard_shortcut_count = 28
     sta clipboard_mem-1,x
     dex
     bne :-
-
-.if ::target_mem=target_x816
-    rts
-.endif
 
     ;Read shortcut table from file, if available
     bridge_setaddr KERNAL_CLOSE         ;Close file #1
@@ -252,11 +274,28 @@ default:
     stz VERA_D0
 
     ;Search key value table for matches (control keys and other keys requiring special actions)
+    ;
+    ;X816: the table is a CONSTANT INSIDE THE EDITOR BLOB, which is linked into
+    ;the firmware bank, while the main loop deliberately runs with DBR=$00 for
+    ;VERA and the editor's own variables. Absolute reads follow DBR, so without
+    ;this bracket the compare below reads bank $00 -- the shell's memory -- and
+    ;not the table. Enter, ESC, Tab, the arrows and the function keys therefore
+    ;missed every entry and were INSERTED into the buffer as characters (Enter
+    ;arrived as $0D, which the CP437 font draws blank, so it looked like the
+    ;editor had eaten the key). The other half of that hazard is worse and did
+    ;not happen to fire: an accidental match jumps through default_jmptbl with
+    ;an index that was never in the table.
+    ;
+    ;The bracket goes around the WHOLE loop, not each read: x816_code_dbr_off
+    ;ends `cmp #0`, which would destroy the comparison it is meant to protect.
+    ;Both exits restore it -- here and at default_match.
+    x816_code_dbr_on
     ldx #default_keyval_end-default_keyval
 :   cmp default_keyval-1,x
     beq default_match
     dex
     bne :-
+    x816_code_dbr_off
 
     ;Convert non-breaking space (Shift+space, ASCII 160) to normal space char (ASCII 32)
     cmp #KEYVAL_SHIFT_SPACE
@@ -278,6 +317,7 @@ default_insert:
 
 default_match:
     ;Action for special keys, for example arrow keys and function keys
+    x816_code_dbr_off                           ;matched with DBR on the code bank
     dex
     txa
     asl
@@ -306,6 +346,11 @@ ctrl:
     and #%11011111
 
     ;Look for matches in key value table
+    ;NO code-bank bracket here, unlike default_keyval above: this table is
+    ;keyboard_ctrl_keyval, which is RAM in the VARS segment -- bank $00 -- and
+    ;is FILLED at startup by keyboard_init from the `keyval` constant. DBR=$00
+    ;is already right. The bank hazard for the Ctrl shortcuts lives in that
+    ;copy, not in this read.
 :   ldx #keyboard_shortcut_count
 :   cmp keyboard_ctrl_keyval-1,x
     beq ctrl_match
@@ -391,6 +436,8 @@ default_jmptbl:
 :   and #%11011111
 
     ;Search keyval table
+    ;keyboard_ctrl_keyval is VARS, i.e. bank $00 -- no code-bank bracket, same
+    ;as the Ctrl path in keyboard_mode_default.
     ldy #keyboard_shortcut_count
 :   cmp keyboard_ctrl_keyval-1,y
     beq match

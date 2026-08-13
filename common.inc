@@ -217,6 +217,7 @@ help_txt                                = $b900               ;1792 bytes ($b900
     X816_CALL_FS_READ    = KERN_TABLE + K_FS_READ    * KERN_ENTRY_SIZE
     X816_CALL_FS_WRITE   = KERN_TABLE + K_FS_WRITE   * KERN_ENTRY_SIZE
     X816_CALL_FS_DELETE  = KERN_TABLE + K_FS_DELETE  * KERN_ENTRY_SIZE
+    X816_CALL_IRQ_FRAMES = KERN_TABLE + K_IRQ_FRAMES * KERN_ENTRY_SIZE
 
     ;K_FS_OPEN's mode. Single-sourced in X816_Calypsi/runtime/kfs.h and
     ;X816_Library/src_acme/core/const_kernel.asm under these names; kept here
