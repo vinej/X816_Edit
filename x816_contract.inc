@@ -102,11 +102,12 @@ X816_VIA1           = $9F00
 X816_VIA2           = $9F10
 X816_VERA           = $9F20        ; $9F20-$9F3F
 X816_YM             = $9F40
-X816_SYSCTL         = $9F80        ; bit 0 boot overlay, bit 1 E flag (r/o), bit 2 turbo
+X816_SYSCTL         = $9F80        ; bit 0 boot overlay, bit 1 E flag (r/o), bit 2 turbo, bit 3 boot desktop
 X816_SYSCTL_LAST    = $9F8F        ; end of the SYSCTL decode
 X816_SYSCTL_OVERLAY = $01          ; bit 0: boot ROM overlay enable
 X816_SYSCTL_EMU     = $02          ; bit 1: CPU E flag, read-only
 X816_SYSCTL_TURBO   = $04          ; bit 2: CPU speed, 0 = 8 MHz average (reset), 1 = 14 MHz
+X816_SYSCTL_DESKTOP = $08          ; bit 3: OSD boot target, 0 = console, 1 = desktop
 X816_SD_LBA         = $9F81        ; $9F81-$9F84 block number, LE
 X816_SD_MEM         = $9F85        ; $9F85-$9F87 DMA address, LE (READ only)
 X816_SD_COUNT       = $9F88        ; blocks to transfer, 1-255
